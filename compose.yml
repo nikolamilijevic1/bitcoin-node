@@ -1,0 +1,216 @@
+name: bitcoin-regtest-lab
+
+x-common: &common
+  restart: unless-stopped
+  networks: [lab]
+  logging:
+    driver: json-file
+    options: {max-size: "10m", max-file: "2"}
+
+services:
+  bitcoin:
+    <<: *common
+    image: bitcoin/bitcoin:29.0
+    environment:
+      BITCOIN_DATA: /home/bitcoin/.bitcoin
+    command: ['-datadir=/home/bitcoin/.bitcoin', '-conf=/etc/bitcoin.conf']
+    volumes:
+      - bitcoin-data:/home/bitcoin/.bitcoin
+      - ./config/bitcoin.conf:/etc/bitcoin.conf:ro
+    mem_limit: 1500m
+    cpus: 2
+    stop_grace_period: 60s
+    healthcheck:
+      test: ['CMD', 'bitcoin-cli', '-conf=/etc/bitcoin.conf', 'getblockchaininfo']
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  electrs:
+    <<: *common
+    image: mempool/electrs:v3.3.0
+    command:
+      - --network=regtest
+      - --daemon-rpc-addr=bitcoin:18443
+      - --cookie=regtest:local-regtest-only
+      - --db-dir=/data
+      - --jsonrpc-import
+      - --http-addr=0.0.0.0:3002
+      - --electrum-rpc-addr=0.0.0.0:50001
+      - --monitoring-addr=0.0.0.0:4224
+      - --electrum-txs-limit=200000
+      - --utxos-limit=200000
+      - --address-search
+      - --timestamp
+      - -v
+    volumes:
+      - esplora-data:/data
+    depends_on:
+      bitcoin: {condition: service_healthy}
+    mem_limit: 1g
+    cpus: 2
+
+  db:
+    <<: *common
+    image: mariadb:10.11.13
+    environment:
+      MARIADB_DATABASE: mempool
+      MARIADB_USER: mempool
+      MARIADB_PASSWORD: local-regtest-db
+      MARIADB_ROOT_PASSWORD: local-regtest-root
+    volumes: ['db-data:/var/lib/mysql']
+    mem_limit: 600m
+    healthcheck:
+      test: ['CMD', 'healthcheck.sh', '--connect', '--innodb_initialized']
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  api:
+    <<: *common
+    image: bitcoin-regtest-lab/backend:3.2.1
+    build: ./docker/backend
+    environment:
+      MEMPOOL_NETWORK: regtest
+      MEMPOOL_BACKEND: esplora
+      ESPLORA_REST_API_URL: http://electrs:3002
+      MEMPOOL_STDOUT_LOG_MIN_PRIORITY: info
+      MEMPOOL_INDEXING_BLOCKS_AMOUNT: '0'
+      MEMPOOL_BLOCKS_SUMMARIES_INDEXING: 'false'
+      MEMPOOL_AUTOMATIC_POOLS_UPDATE: 'false'
+      MEMPOOL_PRICE_UPDATES_PER_HOUR: '0'
+      MEMPOOL_EXTERNAL_ASSETS: '[]'
+      MEMPOOL_RUST_GBT: 'false'
+      ELECTRUM_HOST: electrs
+      ELECTRUM_PORT: '50001'
+      ELECTRUM_TLS_ENABLED: 'false'
+      CORE_RPC_HOST: bitcoin
+      CORE_RPC_PORT: '18443'
+      CORE_RPC_USERNAME: regtest
+      CORE_RPC_PASSWORD: local-regtest-only
+      DATABASE_HOST: db
+      DATABASE_DATABASE: mempool
+      DATABASE_USERNAME: mempool
+      DATABASE_PASSWORD: local-regtest-db
+      FIAT_PRICE_ENABLED: 'false'
+      MAXMIND_ENABLED: 'false'
+      LIGHTNING_ENABLED: 'false'
+      MEMPOOL_SERVICES_ACCELERATIONS: 'false'
+      EXTERNAL_DATA_SERVER_MEMPOOL_API: ''
+      EXTERNAL_DATA_SERVER_LIQUID_API: ''
+    volumes: ['api-cache:/backend/cache']
+    depends_on:
+      bitcoin: {condition: service_healthy}
+      db: {condition: service_healthy}
+      electrs: {condition: service_started}
+    mem_limit: 1g
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -fsS http://localhost:8999/api/v1/backend-info >/dev/null']
+      interval: 15s
+      timeout: 5s
+      retries: 40
+
+  web:
+    <<: *common
+    image: bitcoin-regtest-lab/frontend:3.2.1-regtest1
+    build: ./docker/frontend
+    environment:
+      FRONTEND_HTTP_PORT: '8080'
+      BACKEND_MAINNET_HTTP_HOST: api
+      BACKEND_MAINNET_HTTP_PORT: '8999'
+      BACKEND_REGTEST_HTTP_HOST: api
+      BACKEND_REGTEST_HTTP_PORT: '8999'
+      ROOT_NETWORK: regtest
+      MINING_DASHBOARD: 'false'
+      HISTORICAL_PRICE: 'false'
+      ACCELERATOR: 'false'
+      ACCELERATOR_BUTTON: 'false'
+      SERVICES_API: /disabled-services
+      MEMPOOL_WEBSITE_URL: ''
+    entrypoint: ['/bin/sh', '-c', 'cp /local/nginx-mempool.conf /etc/nginx/conf.d/nginx-mempool.conf && exec /patch/entrypoint.sh nginx -g "daemon off;"']
+    volumes:
+      - ./config/nginx-mempool.conf:/local/nginx-mempool.conf:ro
+    depends_on: [api]
+    mem_limit: 256m
+
+  seed:
+    <<: *common
+    image: python:3.12.10-alpine
+    restart: 'no'
+    command: ['python', '-u', '/app/generate.py']
+    environment:
+      DATASET_SIZE: ${DATASET_SIZE:-medium}
+      DATASET_SEED: ${DATASET_SEED:-2026}
+      EXPLORER_PORT: ${EXPLORER_PORT:-8090}
+    volumes:
+      - ./scripts:/app:ro
+      - dataset:/dataset
+    depends_on:
+      bitcoin: {condition: service_healthy}
+    mem_limit: 400m
+    cpus: 1
+
+  lab:
+    <<: *common
+    image: python:3.12.10-alpine
+    command: ['python', '-u', '/app/lab.py']
+    environment:
+      EXPLORER_PORT: ${EXPLORER_PORT:-8090}
+      GRAFANA_PORT: ${GRAFANA_PORT:-3001}
+    volumes:
+      - ./scripts:/app:ro
+      - dataset:/dataset:ro
+    mem_limit: 128m
+
+  prometheus:
+    <<: *common
+    image: prom/prometheus:v3.3.0
+    command: ['--config.file=/etc/prometheus/prometheus.yml', '--storage.tsdb.retention.time=3d', '--storage.tsdb.retention.size=256MB']
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    mem_limit: 400m
+
+  grafana:
+    <<: *common
+    image: grafana/grafana:11.6.0
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-regtest-dashboard}
+      GF_USERS_ALLOW_SIGN_UP: 'false'
+      GF_ANALYTICS_REPORTING_ENABLED: 'false'
+      GF_ANALYTICS_CHECK_FOR_UPDATES: 'false'
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: 'false'
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/bitcoin.json
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./config/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    mem_limit: 300m
+
+  gateway:
+    <<: *common
+    image: nginx:1.28.0-alpine
+    networks: [lab, browser]
+    volumes:
+      - ./config/gateway.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - '127.0.0.1:${EXPLORER_PORT:-8090}:8080'
+      - '127.0.0.1:${GUIDE_PORT:-8091}:8081'
+      - '127.0.0.1:${GRAFANA_PORT:-3001}:8082'
+    depends_on: [web, lab, grafana]
+    mem_limit: 64m
+
+networks:
+  lab:
+    internal: true
+  browser:
+
+volumes:
+  bitcoin-data:
+  esplora-data:
+  db-data:
+  api-cache:
+  dataset:
+  prometheus-data:
+  grafana-data:
