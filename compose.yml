@@ -68,7 +68,7 @@ services:
 
   api:
     <<: *common
-    image: bitcoin-regtest-lab/backend:3.2.1
+    image: bitcoin-node/backend:3.2.1
     build: ./docker/backend
     environment:
       MEMPOOL_NETWORK: regtest
@@ -112,7 +112,7 @@ services:
 
   web:
     <<: *common
-    image: bitcoin-regtest-lab/frontend:3.2.1-regtest1
+    image: bitcoin-node/frontend:3.2.1-regtest1
     build: ./docker/frontend
     environment:
       FRONTEND_HTTP_PORT: '8080'

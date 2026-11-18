@@ -16,6 +16,19 @@ EXPLORER = 'http://localhost:' + os.environ.get('EXPLORER_PORT', '8090')
 GRAFANA = 'http://localhost:' + os.environ.get('GRAFANA_PORT', '3001')
 cached = {'metrics': '', 'status': {}}
 
+NETWORK_DESCRIPTIONS = {
+    'testnet4': (
+        'Bitcoin testnet4 node',
+        'Live public test network (BIP-94). Test coins have no monetary value.',
+        'Only Bitcoin Core connects to public testnet4 peers (TCP 48333) for blocks and live mempool updates.',
+    ),
+    'mainnet': (
+        'Bitcoin mainnet node',
+        'Full validating Bitcoin mainnet node with local read-only explorer and health monitoring.',
+        'Only Bitcoin Core connects to public Bitcoin peers (TCP 8333) for blocks and live mempool updates.',
+    ),
+}
+
 
 def state():
     if MODE != 'regtest':
@@ -75,19 +88,23 @@ def collect():
         time.sleep(5)
 
 
-def render_testnet4():
+def render_live_node():
+    title, subtitle, p2p_note = NETWORK_DESCRIPTIONS.get(
+        MODE,
+        (f'Bitcoin {MODE} node', 'Local read-only explorer and health monitor.', 'Only Bitcoin Core connects to peers.'),
+    )
     st = cached['status']
     ready = bool(st.get('lab_ready'))
     pct = st.get('bitcoin_verification_progress', 0.0) * 100
     ibd = st.get('bitcoin_initial_block_download', 1)
     status_label = 'Ready to explore' if ready else ('Initial block download in progress' if ibd else 'Indexing — refresh to check progress')
-    disk_mb = st.get('bitcoin_disk_bytes', 0) / (1024 * 1024)
+    disk_mib = st.get('bitcoin_disk_bytes', 0) / (1024 * 1024)
     return f'''<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
-<title>Bitcoin testnet4 lab — status</title><style>
+<title>{html.escape(title)} — status</title><style>
 body{{font:16px system-ui;max-width:960px;margin:40px auto;padding:0 20px;background:#101820;color:#edf2f7}}
 a{{color:#8fd5ff}}.status{{padding:16px;background:#243746;border-radius:8px;line-height:1.6}}
-td,th{{text-align:left;padding:10px;border-bottom:1px solid #425466}}table{{width:100%}}small{{color:#b8c8d8}}</style>
-<h1>Bitcoin testnet4 lab</h1><p>Live public test network (BIP-94). Test coins have no monetary value.</p>
+small{{color:#b8c8d8}}</style>
+<h1>{html.escape(title)}</h1><p>{html.escape(subtitle)}</p>
 <p><a href="{EXPLORER}">Open explorer</a> · <a href="{GRAFANA}">Open health dashboard</a></p>
 <p class="status"><strong>{status_label}</strong><br>
 Sync progress: {pct:.2f}% · node height {st.get('bitcoin_blocks', 'unknown')} / headers {st.get('bitcoin_headers', 'unknown')}<br>
@@ -95,12 +112,12 @@ Index height: {st.get('electrs_height', 'unknown')} (lag {st.get('bitcoin_index_
 explorer height: {st.get('explorer_height', 'unknown')} ·
 mempool: {st.get('bitcoin_mempool_transactions', 'unknown')} txs ·
 peers: {st.get('bitcoin_peers', 'unknown')} ·
-block/undo disk: {disk_mb:.1f} MiB</p>
-<h2>What stays local</h2><ul>
-<li>Only the Bitcoin Core node connects to public testnet4 peers for blocks and live mempool updates.</li>
+block/undo disk: {disk_mib:.1f} MiB</p>
+<h2>Network isolation</h2><ul>
+<li>{html.escape(p2p_note)}</li>
 <li>Address, transaction, and block searches stay inside the local Docker network (<code>electrs</code> + <code>mempool</code>).</li>
 </ul>
-<p><small>Refresh this page while syncing or indexing. Grafana login: admin; password configured in .env (default documented in README).</small></p></html>'''
+<p><small>Refresh this page while syncing or indexing. Grafana login: admin; password configured in .env.</small></p></html>'''
 
 
 def render_regtest():
@@ -146,7 +163,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(json.dumps(cached['status']), 'application/json')
         if self.path != '/':
             return self.reply('Not found', 'text/plain', 404)
-        body = render_regtest() if MODE == 'regtest' else render_testnet4()
+        body = render_regtest() if MODE == 'regtest' else render_live_node()
         self.reply(body, 'text/html; charset=utf-8')
 
     def reply(self, content, content_type, status=200):

@@ -1,235 +1,95 @@
-# Bitcoin Regtest Lab
+# Bitcoin Node & Local Explorer
 
-A private Bitcoin blockchain, local transaction/address explorer, realistic synthetic
-transaction generator, and operational dashboard. Each person runs an independent
-Docker Compose deployment. No public blockchain API is required at runtime.
+Self-contained Docker Compose deployments providing an unpruned Bitcoin Core node, an Esplora/Electrum address indexer (`mempool/electrs`), a local read-only Mempool web explorer, and a Prometheus + Grafana health dashboard.
 
-**Regtest only. The coins have no value. This configuration is not a production/mainnet deployment.**
+Three isolated configurations are included, each using its own Compose project name, Docker volumes, and localhost ports:
 
-## Start
+| Network | Compose File | Purpose |
+|---|---|---|
+| **Mainnet** | `compose.mainnet.yml` | Full validating Bitcoin mainnet node and local explorer |
+| **Testnet4** | `compose.testnet4.yml` | Live public test network (BIP-94) with smaller footprint |
+| **Regtest** | `compose.yml` | Offline private sandbox with automatic synthetic transaction history |
 
-Install Docker Engine with Compose on Linux, or Docker Desktop using Linux containers
-on Windows/macOS. On Windows, use the WSL 2 backend with approximately 6–8 GB available
-to Docker. Check your actual free disk space before starting; leave space for the OS.
+All blockchain lookups, address searches, and transaction views run against your local node and indexer—no third-party explorer APIs are used at runtime.
 
-From this directory:
+---
 
-```sh
-docker compose up -d --build
+## Architecture
+
+```text
+[Bitcoin peers] ──(P2P only on mainnet/testnet4)──> Bitcoin Core (unpruned, txindex=1)
+                                                          │
+                                                          ▼
+                                               mempool/electrs (Esplora + Electrum)
+                                                          │
+                                                          ▼
+                                            Mempool backend ◄──► MariaDB
+                                                          │
+                                                          ▼
+                                              Mempool web (read-only nginx)
+                                                          │
+                                                          ▼
+                                          Localhost gateway (127.0.0.1 only)
+
+Core + electrs + explorer probes ──> status exporter ──> Prometheus ──> Grafana
 ```
 
-The first build downloads pinned images and applies a small regtest compatibility
-patch to the explorer. The generator automatically creates **25,000 transactions**.
-Open the guide while it runs; refresh to see progress. Initial database setup and
-indexing can lag behind transaction generation.
+### Key Design Choices
+- **Network isolation:** On `mainnet` and `testnet4`, only the `bitcoin` container joins the outbound `p2p` bridge (`8333` / `48333`) to sync blocks and receive live mempool updates. `electrs`, `db`, `api`, `web`, `prometheus`, and `grafana` run on an `internal: true` Docker network with no external route. `regtest` runs completely offline.
+- **Read-only explorer:** The frontend nginx config disables external service proxies, enforces a local Content Security Policy, and blocks non-`GET` API requests (`403`) so the explorer cannot broadcast transactions. Fiat prices, external mining-pool updates, and accelerator links are disabled.
+- **Esplora indexing (`mempool/electrs`):** Provides full address histories, balances, and spent-output transaction links (`outspends`) so users can trace spending paths directly in the UI.
+- **Pinned versions & narrow compatibility patches:** `docker/backend` patches `mempool/backend:v3.2.1` so `testnet4` and `regtest` block endpoints use Bitcoin handlers instead of falling back to Liquid handlers, and creates `/backend/cache` with non-root ownership (`1000:1000`). `docker/frontend` patches address-prefix maps in `mempool/frontend:v3.2.1` for `regtest` (`bcrt1`, `m`/`n`, `2`). Both builds fail loudly if upstream patterns change.
+
+---
+
+## Prerequisites
+
+- **Linux (recommended for production):** Docker Engine + Docker Compose plugin.
+- **Windows / macOS:** Docker Desktop with Linux containers (WSL 2 backend on Windows).
+- Internet access at install time to pull/build pinned images (and ongoing P2P access for `mainnet` / `testnet4`).
+
+### Hardware & Storage Planning
+
+| Mode | CPU / RAM | Storage Target | Notes |
+|---|---|---|---|
+| **Mainnet** (`compose.mainnet.yml`) | 6–8 cores, 32+ GB RAM | **2 TB SSD minimum** (4 TB NVMe recommended) | Initial sync + indexing takes days depending on disk and bandwidth. |
+| **Testnet4** (`compose.testnet4.yml`) | 2–4 cores, 6–8 GB Docker RAM | ~35–50 GB | Optional `--lightmode` override cuts `electrs` index size roughly in half (`~28 GB` total observed at tip `162k`). |
+| **Regtest** (`compose.yml`) | 2–4 cores, 6–8 GB Docker RAM | ~1–2 GB | Generates synthetic transactions locally in minutes. |
+
+---
+
+## Quick Start
+
+Copy `.env.example` to `.env` before first startup if you want to customize ports, credentials, or the regtest dataset size:
+
+```sh
+cp .env.example .env
+# PowerShell: Copy-Item .env.example .env
+```
+
+Change the default passwords in `.env` (`GRAFANA_PASSWORD`, `MAINNET_RPC_PASSWORD`, `MAINNET_DB_PASSWORD`, `MAINNET_DB_ROOT_PASSWORD`) before starting **mainnet**. Changing `GRAFANA_PASSWORD` or database passwords after volumes are initialized does not overwrite existing accounts.
+
+### 1. Mainnet
+
+```sh
+docker compose -f compose.mainnet.yml up -d --build
+```
 
 | Interface | Default URL |
 |---|---|
-| Start here: status and example searches | http://localhost:8091 |
-| Transaction and address explorer | http://localhost:8090 |
-| Health dashboard | http://localhost:3001 |
+| Status & sync progress | http://localhost:8095 |
+| Mainnet explorer | http://localhost:8094 |
+| Grafana health dashboard | http://localhost:3003 |
 
-Grafana login: **admin** / **regtest-dashboard**. Set `GRAFANA_PASSWORD` in `.env`
-before the first startup to choose a different initial password. Changing that variable
-after Grafana has initialized its volume does not change the existing account password.
+`electrs` begins serving explorer queries after Bitcoin Core finishes initial block download (`compose.mainnet.yml` mounts `mainnet-bitcoin-data` read-only into `electrs` for faster direct block-file indexing). Check the status page (`http://localhost:8095`) to confirm **Ready to explore** and `lag 0`.
 
-`seed` exiting with code 0 means generation completed successfully, not a failure.
-The guide says **Ready to explore** only when generation is complete and the node,
-indexer, and explorer have caught up.
-
-## Explore the dataset
-
-1. Open the guide and click its first address: this is the deliberately busy address.
-2. Open a **payment-with-change** example.
-3. Inspect the inputs and outputs. The final output continues one of the generated paths.
-4. Follow the explorer's spent-output link to the transaction that spends it.
-5. Try **batch-payment** and **consolidation-and-resplit** examples.
-
-You can paste transaction IDs and regtest addresses into the explorer search box.
-Search blocks by height, or follow block links. The upstream search's block-hash heuristic
-assumes mainnet proof-of-work; arbitrary regtest block hashes may be interpreted as
-transaction IDs. Direct `/block/<hash>` links work.
-
-Amounts are synthetic BTC/satoshis. Ignore fiat equivalents, fee timing, difficulty,
-halving estimates, and other mainnet-oriented dashboard predictions in Mempool:
-prices are disabled and regtest blocks are generated on demand. Use Grafana for lab health.
-All transactions end up confirmed; no continuous background miner runs after seeding.
-
-## Dataset presets
-
-Copy `.env.example` to `.env` to customize settings (PowerShell: `Copy-Item .env.example .env`).
-
-| `DATASET_SIZE` | Non-coinbase transactions | Use |
-|---|---:|---|
-| `small` | 1,000 | Quick functional checks |
-| `medium` | 25,000 | Default exploration dataset |
-| `large` | 100,000 | Opt-in stress trial |
-
-`DATASET_SEED` controls scenario selection. Wallet keys, addresses, block hashes, and
-transaction IDs differ across fresh runs. This is repeatable scenario generation,
-not byte-for-byte deterministic blockchain generation.
-
-The generator uses 64 continuing spending paths and 256 recipient addresses spanning
-native SegWit, Taproot, wrapped SegWit, and legacy formats. Every fifth payment targets
-the busy address. Every 50th transaction combines two inputs and resplits the remainder;
-the next transaction pays ten recipients. Other transactions make a payment plus change.
-Recipient outputs remain unspent; continuing-path outputs are spent repeatedly.
-Thus this version tests receiving/address recognition for all four types, while the
-continuing paths use native SegWit. It does not cover every possible Bitcoin script.
-
-The node first creates 220 funding/maturity blocks, then mines approximately every
-200 generated transactions. Coinbase transactions are additional to preset counts.
-There is no need to fill gigabytes merely to create useful transaction histories.
-Independent transactions are submitted in bounded RPC batches, with checkpoints before
-broadcast, to avoid unnecessary request overhead on workstation hardware.
-
-Generation checkpoints include a write-ahead record before broadcast. If the process
-is interrupted, start `seed` again with the same settings:
-
-```sh
-docker compose start seed
-docker compose logs -f seed
-```
-
-A completed dataset is reused on startup. Different preset/seed settings are rejected
-against existing data: reset explicitly or use another Compose project with different ports.
-The checkpoint logic handles process interruption; it is not a substitute for backups
-against disk loss or corruption. Do not manually spend the generator's continuing outputs
-while generation is running.
-
-## Stop, restart, and reset
-
-Stop services while retaining all data:
-
-```sh
-docker compose down
-```
-
-Resume:
-
-```sh
-docker compose up -d
-```
-
-**Reset deletes this project's synthetic blockchain, wallets, indexes, explorer database,
-and monitoring/dashboard state.** Do this only when you intend to start a new dataset:
-
-```sh
-docker compose down --volumes
-docker compose up -d --build
-```
-
-If using `-p <name>` for a separate project, use that same name for every command.
-Do not use global Docker prune commands: other projects may exist on the machine.
-
-## Verify
-
-After the guide reports ready:
-
-```sh
-docker compose exec -T lab python /app/verify.py
-```
-
-This compares explorer transaction values and inputs against Bitcoin Core, follows
-spending links, checks spent/unspent outputs, checks all four address formats,
-walks every page of the busy address's history against the indexer's independent
-Electrum history response, checks chain counts, and checks monitoring targets.
-
-Host-only unit checks, if Python is installed:
-
-```sh
-python -m unittest discover -s tests -v
-docker compose config --quiet
-```
-
-## Architecture and intentional choices
-
-```text
-Bitcoin Core -> mempool/electrs (Esplora API + Electrum protocol)
-                      |                  |
-                      +--> Mempool <----> MariaDB
-                               |
-                     local browser gateway
-
-Core + indexer + explorer probes -> lab exporter -> Prometheus -> Grafana
-Dataset generator -> Core; local guide reads generator checkpoints
-```
-
-The Esplora-capable **mempool/electrs** fork is intentional. The original
-`romanz/electrs` through Mempool's Electrum backend can report an output as spent
-without returning the spending transaction ID. Esplora supplies the links needed
-to follow spending paths. Its indexes have different, generally higher mainnet storage
-requirements; earlier small-index estimates for romanz/electrs do not apply to this stack.
-Mainnet sizing and hardening remain future work.
-
-Images are pinned by version. The frontend Dockerfile additionally patches two
-address-prefix maps in the pinned Mempool 3.2.1 frontend, which otherwise does not
-recognize regtest addresses in native search/type displays. The patch changes the
-single-network default from mainnet address prefixes to regtest prefixes, preserves
-upstream notices, and fails if the expected patterns disappear. Review it when upgrading.
-The unmodified upstream project is https://github.com/mempool/mempool/tree/v3.2.1.
-
-All data services join an **internal Docker network** without an external route.
-Only nginx gateway joins a regular bridge to publish three **127.0.0.1-only** ports;
-it proxies fixed local services. Node RPC, databases, indexer, and Prometheus are
-not published. Frontend third-party services are disabled/removed from proxy routing,
-and a browser content security policy restricts automatic resource requests.
-The explorer proxy blocks non-GET API requests; upstream broadcast/test forms remain
-visible but are intentionally unavailable through this read-only interface.
-Upstream documentation/footer links may still navigate away if clicked.
-Image pulls/builds require internet access at installation time.
-
-The fixed RPC/database credentials are public development defaults inside this isolated
-regtest deployment. Never connect this configuration to real wallets or expose it to
-a LAN/public network. Changing only the network flag is not a supported mainnet migration.
-
-## Monitoring and storage
-
-Grafana is provisioned automatically with readiness, generation progress, node/indexer
-heights, lag, RPC availability, block-file size, and explorer height-probe latency.
-Probe latency is not a benchmark of arbitrary address searches. Node block storage
-is not the total deployment size, and Docker VM free space is not Windows C: free space.
-
-Prometheus retains at most three days / approximately 256 MB of sample blocks (WAL
-and other overhead are additional). Container logs rotate at 10 MB x 2 per service.
-Services have individual memory limits totaling approximately 5.7 GB; the host needs
-additional Docker/OS memory. Data lives in named Docker volumes, not Windows source folders.
-
-Useful commands:
-
-```sh
-docker compose ps -a
-docker compose logs --tail 50 seed electrs api
-docker stats --no-stream
-docker system df -v
-```
-
-Troubleshooting:
-
-- **Port already in use:** change `EXPLORER_PORT`, `GUIDE_PORT`, or `GRAFANA_PORT` in `.env`.
-- **Generator exited 1:** read `docker compose logs seed`; fix the reported issue, then
-  `docker compose start seed`. Existing preset mismatch requires an intentional reset.
-- **Search is empty:** check the guide's readiness and index height before drawing conclusions.
-- **Services recreated:** internal proxy DNS refreshes every five seconds; briefly unavailable
-  services may produce a transient gateway error while restarting.
-- **Old frontend in browser:** reload without cache after rebuilding the compatibility patch.
-- **Docker unavailable:** start Docker Desktop and select Linux containers.
-- **Disk pressure:** stop the stack, inspect disk use, and reset only this disposable project if desired.
-
-No case management, attribution, clustering, evidence exports, Ethereum, or historical
-mempool archive is included. This is a development lab, not a forensic attribution product.
-
-## Testnet4 (live public test network)
-
-An isolated `testnet4` deployment is provided in `compose.testnet4.yml` (`bitcoin-testnet4-lab`)
-using separate Docker volumes and separate localhost ports so it does not overwrite `regtest`:
+### 2. Testnet4
 
 ```sh
 docker compose -f compose.testnet4.yml up -d --build
 ```
 
-On storage-constrained test machines, add the optional `--lightmode` override (omits duplicate
-raw transaction storage in `electrs` and reads raw transactions from Bitcoin Core's `txindex`):
+For storage-constrained test machines, add the optional `--lightmode` override (`electrs` omits duplicate raw-transaction storage and reads raw transactions from Bitcoin Core's `txindex`):
 
 ```sh
 docker compose -f compose.testnet4.yml -f compose.testnet4.lightmode.yml up -d --build
@@ -237,26 +97,88 @@ docker compose -f compose.testnet4.yml -f compose.testnet4.lightmode.yml up -d -
 
 | Interface | Default URL |
 |---|---|
-| Status guide (sync & index progress) | http://localhost:8093 |
+| Status & sync progress | http://localhost:8093 |
 | Testnet4 explorer | http://localhost:8092 |
-| Health dashboard | http://localhost:3002 |
+| Grafana health dashboard | http://localhost:3002 |
 
-Unlike `regtest`, `bitcoin` joins a `p2p` bridge for outbound peer synchronization and live
-mempool/block updates (`testnet4`, TCP 48333). `electrs`, `db`, `api`, `web`, `prometheus`,
-and `grafana` remain on the internal Docker network without outbound internet access.
-`electrs` begins serving queries once Bitcoin Core finishes initial block download.
-
-Stop or reset only the `testnet4` stack:
+### 3. Regtest (Offline Sandbox)
 
 ```sh
-docker compose -f compose.testnet4.yml down
-docker compose -f compose.testnet4.yml down --volumes  # deletes testnet4 chain & indexes
+docker compose up -d --build
 ```
 
-## Sharing and upstream licenses
+On first startup, the `seed` container automatically creates **25,000** synthetic transactions (`small`: `1,000`, `medium`: `25,000`, `large`: `100,000`, controlled by `DATASET_SIZE` and `DATASET_SEED` in `.env`) covering SegWit, Taproot, wrapped SegWit, legacy addresses, batch payments, consolidations, and spending chains.
 
-Share this repository, not Docker volumes or generated wallets. `.gitignore` excludes
-local settings and temporary files. A GitHub remote has not been configured automatically.
-Third-party software retains its own licenses, including Mempool's AGPL license and
-Grafana's applicable license. The frontend patch source and build instructions are
-included; review upstream redistribution obligations before distributing built images.
+| Interface | Default URL |
+|---|---|
+| Status & clickable examples | http://localhost:8091 |
+| Regtest explorer | http://localhost:8090 |
+| Grafana health dashboard | http://localhost:3001 |
+
+`seed` exiting with code `0` means generation completed. Wait until `http://localhost:8091` reports **Ready to explore**. Note that `regtest` amounts are synthetic and mainnet-oriented widgets in Mempool (fiat equivalents, fee timing, difficulty/halving estimates) do not apply.
+
+---
+
+## Lifecycle Commands
+
+Use the matching `-f <compose-file>` flag for `testnet4` or `mainnet` (omit `-f` for `regtest`).
+
+**Stop containers while keeping blockchain data and indexes:**
+```sh
+docker compose down
+docker compose -f compose.testnet4.yml down
+docker compose -f compose.mainnet.yml down
+```
+
+**Resume existing data:**
+```sh
+docker compose up -d
+docker compose -f compose.testnet4.yml up -d
+docker compose -f compose.mainnet.yml up -d
+```
+
+**Full reset (deletes only that network's volumes, chain data, indexes, and DB state):**
+```sh
+docker compose down --volumes
+```
+
+Avoid global Docker prune commands (`docker system prune --volumes`) if other projects share the host.
+
+---
+
+## Verification
+
+After `regtest` reports ready (`http://localhost:8091`), run the automated integration check:
+
+```sh
+docker compose exec -T lab python /app/verify.py
+```
+
+This verifies explorer transactions and `outspends` links against Bitcoin Core, checks all four address formats, walks every pagination page of the high-activity address against Electrum, confirms read-only `POST` rejection (`403`), and checks Prometheus targets.
+
+Host-only unit and Compose validation checks:
+
+```sh
+python -m unittest discover -s tests -v
+docker compose config --quiet
+docker compose -f compose.testnet4.yml config --quiet
+docker compose -f compose.testnet4.yml -f compose.testnet4.lightmode.yml config --quiet
+docker compose -f compose.mainnet.yml config --quiet
+```
+
+---
+
+## Monitoring & Troubleshooting
+
+Grafana login defaults to `admin` / `regtest-dashboard` (set `GRAFANA_PASSWORD` in `.env`). The pre-provisioned **Bitcoin Regtest Lab** dashboard monitors `lab_ready`, node height, `electrs` index height, indexing lag, RPC availability, block/undo storage, and explorer probe latency. Prometheus retains at most 3 days / 256 MB, and container logs rotate at `10 MB x 2`.
+
+- **Port already in use:** Override the relevant `*_PORT` variables in `.env`.
+- **Explorer searches return nothing while starting:** Check the status guide URL first; `electrs` only opens queries once Bitcoin Core finishes initial block download and initial indexing completes.
+- **Changing `DATASET_SIZE` / `DATASET_SEED` in regtest:** Existing completed data is preserved; run `docker compose down --volumes` before switching presets.
+- **Transient gateway errors after recreate:** Internal nginx DNS refreshes every 5 seconds while containers restart.
+
+---
+
+## Licenses
+
+All third-party components retain their respective upstream licenses, including Bitcoin Core (MIT), `mempool/electrs` (MIT), Mempool backend/frontend (AGPL-3.0), MariaDB (GPL-2.0), Prometheus (Apache-2.0), and Grafana (AGPL-3.0). Patch scripts and Docker build definitions are included in `docker/`.
