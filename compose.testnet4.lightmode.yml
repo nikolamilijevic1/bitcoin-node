@@ -1,0 +1,18 @@
+# Optional override for disk-constrained test machines (omits duplicate raw-tx store in RocksDB).
+services:
+  electrs:
+    command:
+      - --network=testnet4
+      - --daemon-rpc-addr=bitcoin:48332
+      - --cookie=testnet4:local-testnet4-only
+      - --db-dir=/data
+      - --jsonrpc-import
+      - --lightmode
+      - --http-addr=0.0.0.0:3002
+      - --electrum-rpc-addr=0.0.0.0:50001
+      - --monitoring-addr=0.0.0.0:4224
+      - --electrum-txs-limit=200000
+      - --utxos-limit=200000
+      - --address-search
+      - --timestamp
+      - -v

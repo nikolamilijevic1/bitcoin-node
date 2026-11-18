@@ -219,6 +219,40 @@ Troubleshooting:
 No case management, attribution, clustering, evidence exports, Ethereum, or historical
 mempool archive is included. This is a development lab, not a forensic attribution product.
 
+## Testnet4 (live public test network)
+
+An isolated `testnet4` deployment is provided in `compose.testnet4.yml` (`bitcoin-testnet4-lab`)
+using separate Docker volumes and separate localhost ports so it does not overwrite `regtest`:
+
+```sh
+docker compose -f compose.testnet4.yml up -d --build
+```
+
+On storage-constrained test machines, add the optional `--lightmode` override (omits duplicate
+raw transaction storage in `electrs` and reads raw transactions from Bitcoin Core's `txindex`):
+
+```sh
+docker compose -f compose.testnet4.yml -f compose.testnet4.lightmode.yml up -d --build
+```
+
+| Interface | Default URL |
+|---|---|
+| Status guide (sync & index progress) | http://localhost:8093 |
+| Testnet4 explorer | http://localhost:8092 |
+| Health dashboard | http://localhost:3002 |
+
+Unlike `regtest`, `bitcoin` joins a `p2p` bridge for outbound peer synchronization and live
+mempool/block updates (`testnet4`, TCP 48333). `electrs`, `db`, `api`, `web`, `prometheus`,
+and `grafana` remain on the internal Docker network without outbound internet access.
+`electrs` begins serving queries once Bitcoin Core finishes initial block download.
+
+Stop or reset only the `testnet4` stack:
+
+```sh
+docker compose -f compose.testnet4.yml down
+docker compose -f compose.testnet4.yml down --volumes  # deletes testnet4 chain & indexes
+```
+
 ## Sharing and upstream licenses
 
 Share this repository, not Docker volumes or generated wallets. `.gitignore` excludes
