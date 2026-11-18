@@ -10,7 +10,7 @@ Three isolated configurations are included, each using its own Compose project n
 | **Testnet4** | `compose.testnet4.yml` | Live public test network (BIP-94) with smaller footprint |
 | **Regtest** | `compose.yml` | Offline private sandbox with automatic synthetic transaction history |
 
-All blockchain lookups, address searches, and transaction views run against your local node and indexer—no third-party explorer APIs are used at runtime.
+All blockchain lookups, address searches, and transaction views run against your local node and indexer; no third-party explorer APIs are used at runtime.
 
 ---
 
@@ -176,6 +176,22 @@ Grafana login defaults to `admin` / `regtest-dashboard` (set `GRAFANA_PASSWORD` 
 - **Explorer searches return nothing while starting:** Check the status guide URL first; `electrs` only opens queries once Bitcoin Core finishes initial block download and initial indexing completes.
 - **Changing `DATASET_SIZE` / `DATASET_SEED` in regtest:** Existing completed data is preserved; run `docker compose down --volumes` before switching presets.
 - **Transient gateway errors after recreate:** Internal nginx DNS refreshes every 5 seconds while containers restart.
+
+---
+
+## Screenshots
+
+### Local Explorer (Testnet4 Live Dashboard)
+![Testnet4 Explorer](docs/screenshots/testnet4-explorer.png)
+
+### Transaction Flow & Details
+![Transaction Flow](docs/screenshots/testnet4-tx-flow.png)
+
+### Status Guide
+![Status Guide](docs/screenshots/status-guide.png)
+
+### Grafana Health Dashboard
+![Grafana Health Dashboard](docs/screenshots/grafana-dashboard.png)
 
 ---
 
